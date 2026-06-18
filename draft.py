@@ -1,9 +1,9 @@
+import os
 import time
-import numpy as np
 import torch as th
 import matplotlib.pyplot as plt
-import motornet as mn
 
+from arm_env import make_env, Policy, n_steps
 
 # -----------------------------
 # Settings
@@ -11,88 +11,16 @@ import motornet as mn
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-dt = 0.01
-duration = 2.0
-n_steps = int(duration / dt)
-
 batch_size = 32
 n_batches = 1000
-
-amplitude = 0.08
-frequency = 0.5
-x_center = 0.25
-y_center = 0.25
-
+checkpoint_interval = 100
+checkpoint_path = "checkpoint.pt"
+model_path = "rigid_tendon_arm26_sinusoidal.pt"
 
 # -----------------------------
-# Effector
+# Environment and policy
 # -----------------------------
-muscle = mn.muscle.RigidTendonHillMuscle()
-effector = mn.effector.RigidTendonArm26(muscle=muscle)
-
-
-# -----------------------------
-# Environment
-# -----------------------------
-class SinusoidalArmEnv(mn.environment.Environment):
-    def __init__(self, effector, max_ep_duration):
-        super().__init__(effector=effector, max_ep_duration=max_ep_duration)
-
-    def make_target(self, batch_size):
-        t = th.arange(n_steps, device=device) * dt
-
-        x = x_center + 0.05 * th.cos(2 * np.pi * frequency * t)
-        y = y_center + amplitude * th.sin(2 * np.pi * frequency * t)
-
-        target = th.stack([x, y], dim=-1)
-        return target.unsqueeze(0).repeat(batch_size, 1, 1)
-
-    def get_position(self, info):
-        if "cartesian" in info:
-            return info["cartesian"][:, :2]
-
-        if "cartesian_state" in info:
-            return info["cartesian_state"][:, :2]
-
-        if "states" in info:
-            for key in ["cartesian", "cartesian_state"]:
-                if key in info["states"]:
-                    return info["states"][key][:, :2]
-
-        raise KeyError(f"Could not find cartesian position. Info keys: {info.keys()}")
-
-
-env = SinusoidalArmEnv(effector=effector, max_ep_duration=duration)
-
-
-# -----------------------------
-# Policy network
-# -----------------------------
-class Policy(th.nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super().__init__()
-
-        self.hidden_dim = hidden_dim
-        self.gru = th.nn.GRU(input_dim, hidden_dim, batch_first=True)
-        self.fc = th.nn.Linear(hidden_dim, output_dim)
-        self.sigmoid = th.nn.Sigmoid()
-
-        th.nn.init.xavier_uniform_(self.gru.weight_ih_l0)
-        th.nn.init.orthogonal_(self.gru.weight_hh_l0)
-        th.nn.init.zeros_(self.gru.bias_ih_l0)
-        th.nn.init.zeros_(self.gru.bias_hh_l0)
-
-        th.nn.init.xavier_uniform_(self.fc.weight)
-        th.nn.init.constant_(self.fc.bias, -5.0)
-
-    def forward(self, obs, hidden):
-        y, hidden = self.gru(obs[:, None, :], hidden)
-        action = self.sigmoid(self.fc(y)).squeeze(1)
-        return action, hidden
-
-    def init_hidden(self, batch_size):
-        return th.zeros(1, batch_size, self.hidden_dim, device=device)
-
+env = make_env()
 
 policy = Policy(
     input_dim=env.observation_space.shape[0],
@@ -100,7 +28,26 @@ policy = Policy(
     output_dim=env.n_muscles,
 ).to(device)
 
+th.nn.init.xavier_uniform_(policy.gru.weight_ih_l0)
+th.nn.init.orthogonal_(policy.gru.weight_hh_l0)
+th.nn.init.zeros_(policy.gru.bias_ih_l0)
+th.nn.init.zeros_(policy.gru.bias_hh_l0)
+th.nn.init.xavier_uniform_(policy.fc.weight)
+th.nn.init.constant_(policy.fc.bias, -5.0)
+
 optimizer = th.optim.Adam(policy.parameters(), lr=1e-3)
+
+start_batch = 0
+loss_history = []
+
+# Resume from checkpoint if available
+if os.path.exists(checkpoint_path):
+    checkpoint = th.load(checkpoint_path, map_location=device)
+    policy.load_state_dict(checkpoint["policy"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    start_batch = checkpoint["batch"] + 1
+    loss_history = checkpoint["loss_history"]
+    print(f"Resumed from checkpoint at batch {start_batch}")
 
 
 # -----------------------------
@@ -109,45 +56,34 @@ optimizer = th.optim.Adam(policy.parameters(), lr=1e-3)
 def rollout(batch_size):
     obs, info = env.reset(options={"batch_size": batch_size})
     obs = obs.to(device)
-
-    hidden = policy.init_hidden(batch_size)
+    hidden = policy.init_hidden(batch_size, device)
 
     positions = []
     actions = []
 
     for _ in range(n_steps):
         action, hidden = policy(obs, hidden)
-
         obs, reward, terminated, truncated, info = env.step(action)
         obs = obs.to(device)
-
-        pos = env.get_position(info).to(device)
-
+        pos = env.get_cartesian_position(info).to(device)
         positions.append(pos)
         actions.append(action)
 
-    positions = th.stack(positions, dim=1)
-    actions = th.stack(actions, dim=1)
-
-    return positions, actions
+    return th.stack(positions, dim=1), th.stack(actions, dim=1)
 
 
 # -----------------------------
 # Training
 # -----------------------------
-loss_history = []
-start_training = time.time()
-
-for batch in range(n_batches):
+for batch in range(start_batch, n_batches):
     batch_start = time.time()
 
-    target = env.make_target(batch_size)
+    target = env.make_target(batch_size, device)
     positions, actions = rollout(batch_size)
 
     tracking_loss = th.mean((positions - target) ** 2)
     effort_loss = th.mean(actions ** 2)
     smooth_loss = th.mean((actions[:, 1:] - actions[:, :-1]) ** 2)
-
     loss = tracking_loss + 1e-4 * effort_loss + 1e-3 * smooth_loss
 
     optimizer.zero_grad()
@@ -155,11 +91,10 @@ for batch in range(n_batches):
     th.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
     optimizer.step()
 
-    batch_time = time.time() - batch_start
-    remaining_batches = n_batches - batch - 1
-    eta_min = batch_time * remaining_batches / 60
-
     loss_history.append(loss.item())
+
+    batch_time = time.time() - batch_start
+    eta_min = batch_time * (n_batches - batch - 1) / 60
 
     print(
         f"Batch {batch + 1}/{n_batches} | "
@@ -171,6 +106,15 @@ for batch in range(n_batches):
         f"ETA: {eta_min:.1f} min"
     )
 
+    if (batch + 1) % checkpoint_interval == 0:
+        th.save({
+            "batch": batch,
+            "policy": policy.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "loss_history": loss_history,
+        }, checkpoint_path)
+        print(f"  -> Checkpoint saved at batch {batch + 1}")
+
 
 # -----------------------------
 # Validation plot
@@ -178,7 +122,7 @@ for batch in range(n_batches):
 policy.eval()
 
 with th.no_grad():
-    target = env.make_target(1)
+    target = env.make_target(1, device)
     positions, actions = rollout(1)
 
 target_np = target[0].cpu().numpy()
@@ -201,9 +145,12 @@ plt.ylabel("loss")
 plt.title("Training loss")
 plt.show()
 
+# -----------------------------
+# Save final model
+# -----------------------------
+th.save(policy.state_dict(), model_path)
+print(f"Saved model to {model_path}")
 
-# -----------------------------
-# Save model
-# -----------------------------
-th.save(policy.state_dict(), "rigid_tendon_arm26_sinusoidal.pt")
-print("Saved model to rigid_tendon_arm26_sinusoidal.pt")
+if os.path.exists(checkpoint_path):
+    os.remove(checkpoint_path)
+    print("Removed checkpoint file")
