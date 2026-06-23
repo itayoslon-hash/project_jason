@@ -3,7 +3,8 @@ import time
 import torch as th
 import matplotlib.pyplot as plt
 
-from arm_env import make_env, Policy, n_steps
+import numpy as np
+from arm_env import make_env, Policy, n_steps, x_center, dt, ellipse_start_joint_state
 
 # -----------------------------
 # Settings
@@ -23,7 +24,7 @@ model_path = "rigid_tendon_arm26_sinusoidal.pt"
 env = make_env()
 
 policy = Policy(
-    input_dim=env.observation_space.shape[0],
+    input_dim=env.observation_space.shape[0] + 2,  # +2 for (target_x, target_y)
     hidden_dim=64,
     output_dim=env.n_muscles,
 ).to(device)
@@ -40,6 +41,11 @@ optimizer = th.optim.Adam(policy.parameters(), lr=1e-3)
 start_batch = 0
 loss_history = []
 
+# Precompute IK for ellipse start once (same t=0 point for all frequencies)
+print("Computing IK for ellipse start position...")
+_ik_base = ellipse_start_joint_state(1, noise_std=0.0)
+print(f"  Joint angles: theta1={_ik_base[0,0]:.3f}, theta2={_ik_base[0,1]:.3f}")
+
 # Resume from checkpoint if available
 if os.path.exists(checkpoint_path):
     checkpoint = th.load(checkpoint_path, map_location=device)
@@ -53,16 +59,19 @@ if os.path.exists(checkpoint_path):
 # -----------------------------
 # Rollout
 # -----------------------------
-def rollout(batch_size):
-    obs, info = env.reset(options={"batch_size": batch_size})
+def rollout(batch_size, target):
+    joint_state = _ik_base.to(device).expand(batch_size, -1).clone()
+    obs, info = env.reset(options={"batch_size": batch_size, "joint_state": joint_state})
     obs = obs.to(device)
     hidden = policy.init_hidden(batch_size, device)
 
     positions = []
     actions = []
 
-    for _ in range(n_steps):
-        action, hidden = policy(obs, hidden)
+    for step in range(n_steps):
+        target_now = target[:, step, :]
+        obs_aug = th.cat([obs, target_now], dim=-1)
+        action, hidden = policy(obs_aug, hidden)
         obs, reward, terminated, truncated, info = env.step(action)
         obs = obs.to(device)
         pos = env.get_cartesian_position(info).to(device)
@@ -78,13 +87,25 @@ def rollout(batch_size):
 for batch in range(start_batch, n_batches):
     batch_start = time.time()
 
-    target = env.make_target(batch_size, device)
-    positions, actions = rollout(batch_size)
+    progress = batch / n_batches
+    max_freq = 0.5 + 2.0 * progress
+    freq = np.random.uniform(0.25, max_freq)
+    target = env.make_target(batch_size, device, freq=freq)
+    positions, actions = rollout(batch_size, target)
 
-    tracking_loss = th.mean((positions - target) ** 2)
-    effort_loss = th.mean(actions ** 2)
-    smooth_loss = th.mean((actions[:, 1:] - actions[:, :-1]) ** 2)
-    loss = tracking_loss + 1e-4 * effort_loss + 1e-3 * smooth_loss
+    pos_x = positions[:, :, 0]
+    target_x = target[:, :, 0]
+    pos_y = positions[:, :, 1]
+    target_y = target[:, :, 1]
+
+    y_loss = th.mean((pos_y - target_y) ** 2)
+    vel_pos_y = (pos_y[:, 1:] - pos_y[:, :-1]) / dt
+    vel_target_y = (target_y[:, 1:] - target_y[:, :-1]) / dt
+    vel_loss = th.mean((vel_pos_y - vel_target_y) ** 2)
+    x_loss = th.mean((pos_x - x_center) ** 2)
+    tracking_loss = y_loss + 0.3 * vel_loss + 10.0 * x_loss
+
+    loss = tracking_loss
 
     optimizer.zero_grad()
     loss.backward()
@@ -99,9 +120,10 @@ for batch in range(start_batch, n_batches):
     print(
         f"Batch {batch + 1}/{n_batches} | "
         f"Loss: {loss.item():.6f} | "
-        f"Track: {tracking_loss.item():.6f} | "
-        f"Effort: {effort_loss.item():.6f} | "
-        f"Smooth: {smooth_loss.item():.6f} | "
+        f"freq: {freq:.2f} | "
+        f"Y: {y_loss.item():.6f} | "
+        f"Vel: {vel_loss.item():.6f} | "
+        f"X: {x_loss.item():.6f} | "
         f"Time: {batch_time:.2f}s | "
         f"ETA: {eta_min:.1f} min"
     )
@@ -123,7 +145,7 @@ policy.eval()
 
 with th.no_grad():
     target = env.make_target(1, device)
-    positions, actions = rollout(1)
+    positions, actions = rollout(1, target)
 
 target_np = target[0].cpu().numpy()
 pos_np = positions[0].cpu().numpy()
@@ -144,6 +166,17 @@ plt.xlabel("batch")
 plt.ylabel("loss")
 plt.title("Training loss")
 plt.show()
+
+# -----------------------------
+# Mean Square Jerk (MSJ)
+# MSJ = (1/N) * sum((d³x/dt³)²)
+# Third derivative approximated via finite differences:
+# jerk[i] = (x[i+3] - 3x[i+2] + 3x[i+1] - x[i]) / dt³
+# -----------------------------
+pos_x = pos_np[:, 0]
+jerk = (pos_x[3:] - 3 * pos_x[2:-1] + 3 * pos_x[1:-2] - pos_x[:-3]) / (dt ** 3)
+msj = np.mean(jerk ** 2)
+print(f"\nMean Square Jerk (MSJ): {msj:.4f} m^2/s^6")
 
 # -----------------------------
 # Save final model

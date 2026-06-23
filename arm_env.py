@@ -8,18 +8,20 @@ n_steps = int(duration / dt)
 
 amplitude = 0.08
 frequency = 0.5
-x_center = 0.25
-y_center = 0.25
+x_center = 0.3
+y_center = 0.3
 
 
 class SinusoidalArmEnv(mn.environment.Environment):
     def __init__(self, effector, max_ep_duration):
         super().__init__(effector=effector, max_ep_duration=max_ep_duration)
 
-    def make_target(self, batch_size, device="cpu"):
+    def make_target(self, batch_size, device="cpu", freq=None):
+        f = freq if freq is not None else frequency
         t = th.arange(n_steps, device=device) * dt
-        x = x_center + 0.05 * th.cos(2 * np.pi * frequency * t)
-        y = y_center + amplitude * th.sin(2 * np.pi * frequency * t)
+        disp = amplitude * th.sin(2 * np.pi * f * t)
+        x = x_center + disp * np.cos(3 * np.pi / 4)
+        y = y_center + disp * np.sin(3 * np.pi / 4)
         target = th.stack([x, y], dim=-1)
         return target.unsqueeze(0).repeat(batch_size, 1, 1)
 
@@ -67,3 +69,39 @@ def make_env():
     muscle = mn.muscle.RigidTendonHillMuscle()
     effector = mn.effector.RigidTendonArm26(muscle=muscle)
     return SinusoidalArmEnv(effector=effector, max_ep_duration=duration)
+
+
+def _ik_near(tx, ty, n_iter=500):
+    """Gradient-descent IK: find valid joint angles closest to cartesian target."""
+    l1, l2 = 0.309, 0.333
+    lb = th.tensor([0.0, 0.0])
+    ub = th.tensor([2.3562, 2.7053])
+    theta = th.tensor([0.3, 1.5], dtype=th.float32, requires_grad=True)
+    opt = th.optim.Adam([theta], lr=0.02)
+    for _ in range(n_iter):
+        opt.zero_grad()
+        x = l1 * th.cos(theta[0]) + l2 * th.cos(theta[0] + theta[1])
+        y = l1 * th.sin(theta[0]) + l2 * th.sin(theta[0] + theta[1])
+        loss = (x - tx) ** 2 + (y - ty) ** 2
+        loss.backward()
+        opt.step()
+        with th.no_grad():
+            theta.clamp_(lb, ub)
+    return theta.detach()
+
+
+def ellipse_start_joint_state(batch_size, noise_std=0.05, device="cpu"):
+    """
+    Finds joint angles closest to ellipse t=0 point via IK, adds per-batch noise.
+    Returns joint state [theta1, theta2, dtheta1, dtheta2].
+    """
+    lb = th.tensor([0.0, 0.0, 0.0, 0.0], device=device)
+    ub = th.tensor([2.3562, 2.7053, 1.0, 1.0], device=device)
+
+    t = _ik_near(x_center, y_center)  # t=0 on rail: (x_center, y_center)
+    base = th.tensor([t[0], t[1], 0.0, 0.0], dtype=th.float32, device=device)
+
+    noise = th.randn(batch_size, 4, device=device) * noise_std
+    noise[:, 2:] = 0.0  # start stationary
+
+    return (base.unsqueeze(0).expand(batch_size, -1) + noise).clamp(lb, ub)
