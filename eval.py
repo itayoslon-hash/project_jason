@@ -2,7 +2,7 @@ import numpy as np
 import torch as th
 import matplotlib.pyplot as plt
 
-from arm_env import make_env, Policy, n_steps, x_center, dt, ellipse_start_joint_state
+from arm_env import make_env, Policy, n_steps, dt, midrange_start_joint_state
 
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 checkpoint_path = "checkpoint.pt"
@@ -24,7 +24,7 @@ print(f"Loaded checkpoint at batch {batch_reached}")
 policy.eval()
 
 def rollout(target):
-    joint_state = ellipse_start_joint_state(1, noise_std=0.0, device=device)
+    joint_state = midrange_start_joint_state(1, device=device)
     obs, info = env.reset(options={"batch_size": 1, "joint_state": joint_state})
     obs = obs.to(device)
     hidden = policy.init_hidden(1, device)

@@ -3,7 +3,7 @@ import torch as th
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-from arm_env import make_env, Policy, n_steps, dt, ellipse_start_joint_state
+from arm_env import make_env, Policy, n_steps, dt, midrange_start_joint_state
 
 # -----------------------------
 # Settings
@@ -46,10 +46,7 @@ def arm_points_from_angles(theta):
 # Rollout for a given frequency
 # -----------------------------
 def run_freq(freq):
-    joint_state = ellipse_start_joint_state(1, noise_std=0.0, device=device)
-    lb = th.tensor(env.effector.pos_lower_bound.tolist() + [0., 0.], device=device)
-    ub = th.tensor(env.effector.pos_upper_bound.tolist() + [1., 1.], device=device)
-    joint_state = joint_state.clamp(lb, ub)
+    joint_state = midrange_start_joint_state(1, device=device)
 
     obs, info = env.reset(options={"batch_size": 1, "joint_state": joint_state})
     obs = obs.to(device)
@@ -95,8 +92,8 @@ arm_lines, target_points, endpoint_traces, target_traces = [], [], [], []
 
 for i, ax in enumerate(axes):
     ax.set_aspect("equal")
-    ax.set_xlim(-0.1, 0.75)
-    ax.set_ylim(-0.1, 0.75)
+    ax.set_xlim(-0.5, 0.5)
+    ax.set_ylim(0.1, 0.85)
     ax.set_title(f"f = {frequencies[i]:.2f} Hz", fontsize=9)
     ax.set_xlabel("x [m]", fontsize=7)
     ax.set_ylabel("y [m]", fontsize=7)

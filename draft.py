@@ -4,7 +4,7 @@ import torch as th
 import matplotlib.pyplot as plt
 
 import numpy as np
-from arm_env import make_env, Policy, n_steps, x_center, dt, ellipse_start_joint_state
+from arm_env import make_env, Policy, n_steps, dt, midrange_start_joint_state
 
 # -----------------------------
 # Settings
@@ -41,10 +41,8 @@ optimizer = th.optim.Adam(policy.parameters(), lr=1e-3)
 start_batch = 0
 loss_history = []
 
-# Precompute IK for ellipse start once (same t=0 point for all frequencies)
-print("Computing IK for ellipse start position...")
-_ik_base = ellipse_start_joint_state(1, noise_std=0.0)
-print(f"  Joint angles: theta1={_ik_base[0,0]:.3f}, theta2={_ik_base[0,1]:.3f}")
+_start_state = midrange_start_joint_state(1)
+print(f"Start joint angles: theta1={_start_state[0,0]:.4f} rad, theta2={_start_state[0,1]:.4f} rad")
 
 # Resume from checkpoint if available
 if os.path.exists(checkpoint_path):
@@ -60,7 +58,7 @@ if os.path.exists(checkpoint_path):
 # Rollout
 # -----------------------------
 def rollout(batch_size, target):
-    joint_state = _ik_base.to(device).expand(batch_size, -1).clone()
+    joint_state = _start_state.to(device).expand(batch_size, -1).clone()
     obs, info = env.reset(options={"batch_size": batch_size, "joint_state": joint_state})
     obs = obs.to(device)
     hidden = policy.init_hidden(batch_size, device)
@@ -93,19 +91,14 @@ for batch in range(start_batch, n_batches):
     target = env.make_target(batch_size, device, freq=freq)
     positions, actions = rollout(batch_size, target)
 
-    pos_x = positions[:, :, 0]
-    target_x = target[:, :, 0]
-    pos_y = positions[:, :, 1]
-    target_y = target[:, :, 1]
+    pos_loss = th.mean((positions[:, :, 0] - target[:, :, 0]) ** 2
+                     + (positions[:, :, 1] - target[:, :, 1]) ** 2)
 
-    y_loss = th.mean((pos_y - target_y) ** 2)
-    vel_pos_y = (pos_y[:, 1:] - pos_y[:, :-1]) / dt
-    vel_target_y = (target_y[:, 1:] - target_y[:, :-1]) / dt
-    vel_loss = th.mean((vel_pos_y - vel_target_y) ** 2)
-    x_loss = th.mean((pos_x - x_center) ** 2)
-    tracking_loss = y_loss + 0.3 * vel_loss + 10.0 * x_loss
+    vel_pos    = (positions[:, 1:, :] - positions[:, :-1, :]) / dt
+    vel_target = (target[:, 1:, :]    - target[:, :-1, :])    / dt
+    vel_loss   = th.mean((vel_pos - vel_target) ** 2)
 
-    loss = tracking_loss
+    loss = pos_loss + 0.3 * vel_loss
 
     optimizer.zero_grad()
     loss.backward()
@@ -121,9 +114,8 @@ for batch in range(start_batch, n_batches):
         f"Batch {batch + 1}/{n_batches} | "
         f"Loss: {loss.item():.6f} | "
         f"freq: {freq:.2f} | "
-        f"Y: {y_loss.item():.6f} | "
+        f"Pos: {pos_loss.item():.6f} | "
         f"Vel: {vel_loss.item():.6f} | "
-        f"X: {x_loss.item():.6f} | "
         f"Time: {batch_time:.2f}s | "
         f"ETA: {eta_min:.1f} min"
     )
@@ -169,9 +161,6 @@ plt.show()
 
 # -----------------------------
 # Mean Square Jerk (MSJ)
-# MSJ = (1/N) * sum((d³x/dt³)²)
-# Third derivative approximated via finite differences:
-# jerk[i] = (x[i+3] - 3x[i+2] + 3x[i+1] - x[i]) / dt³
 # -----------------------------
 pos_x = pos_np[:, 0]
 jerk = (pos_x[3:] - 3 * pos_x[2:-1] + 3 * pos_x[1:-2] - pos_x[:-3]) / (dt ** 3)
