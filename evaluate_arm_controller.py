@@ -2,7 +2,7 @@ import numpy as np
 import torch as th
 import matplotlib.pyplot as plt
 
-from arm_env import make_env, Policy, n_steps, dt, midrange_start_joint_state
+from arm_environment import make_env, Policy, n_steps, dt, midrange_start_joint_state
 
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 checkpoint_path = "checkpoint.pt"

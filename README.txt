@@ -10,23 +10,31 @@ SETUP
 Install dependencies:
     pip install -r requirements.txt
 
+Training requires a CUDA-enabled PyTorch installation and an available NVIDIA
+GPU. Verify the setup with:
+    python -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu126
+    python -c "import torch; print(torch.cuda.is_available())"
+
+The training script stops with an error instead of silently falling back to CPU
+when CUDA is unavailable.
+
 
 FILES
 -----
-arm_env.py
+arm_environment.py
     Shared module. Defines the motornet environment, Policy (GRU network),
     IK utilities, and trajectory generation. All other scripts import from here.
 
-draft.py
+train_arm_controller.py
     Training script. Runs curriculum learning over sinusoidal trajectories
     (frequency ramps from 0.5 Hz to 2.5 Hz). Saves checkpoints every 100 batches
     and a final model to rigid_tendon_arm26_sinusoidal.pt.
 
-trained_model_action.py
+visualize_trained_controller.py
     Visualization script. Loads the trained model and runs it at 10 different
     frequencies, displaying all results as a 2x5 animated grid.
 
-eval.py
+evaluate_arm_controller.py
     Evaluation script. Loads a checkpoint and prints the dX tracking metric
     and Mean Square Jerk (MSJ), plus a tracking plot and loss curve.
 
@@ -34,16 +42,16 @@ eval.py
 USAGE
 -----
 1. Train the model:
-    python draft.py
+    python train_arm_controller.py
 
-   Set n_batches in draft.py to control training length.
+   Set n_batches in train_arm_controller.py to control training length.
    Training resumes automatically from checkpoint.pt if it exists.
 
 2. Visualize the trained model:
-    python trained_model_action.py
+    python visualize_trained_controller.py
 
 3. Evaluate a checkpoint mid-training:
-    python eval.py
+    python evaluate_arm_controller.py
 
 
 TRAJECTORY

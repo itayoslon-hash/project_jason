@@ -3,7 +3,7 @@ import torch as th
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-from arm_env import make_env, Policy, n_steps, dt, midrange_start_joint_state
+from arm_environment import make_env, Policy, n_steps, dt, midrange_start_joint_state
 
 # -----------------------------
 # Settings

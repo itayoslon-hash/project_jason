@@ -4,13 +4,19 @@ import torch as th
 import matplotlib.pyplot as plt
 
 import numpy as np
-from arm_env import make_env, Policy, n_steps, dt, midrange_start_joint_state
+from arm_environment import make_env, Policy, n_steps, dt, midrange_start_joint_state
 
 # -----------------------------
 # Settings
 # -----------------------------
-device = th.device("cuda" if th.cuda.is_available() else "cpu")
-print("Using device:", device)
+if not th.cuda.is_available():
+    raise RuntimeError(
+        "CUDA is required for training. Install a CUDA-enabled PyTorch build "
+        "and verify that an NVIDIA GPU is available."
+    )
+
+device = th.device("cuda")
+print(f"Using device: {device} ({th.cuda.get_device_name(device)})")
 
 batch_size = 32
 n_batches = 1000
