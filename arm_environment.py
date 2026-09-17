@@ -68,10 +68,14 @@ class Policy(th.nn.Module):
         return th.zeros(1, batch_size, self.hidden_dim, device=device)
 
 
-def make_env():
+def make_env(device="cpu"):
     muscle = mn.muscle.RigidTendonHillMuscle()
     effector = mn.effector.RigidTendonArm26(muscle=muscle)
-    return SinusoidalArmEnv(effector=effector, max_ep_duration=duration)
+    env = SinusoidalArmEnv(effector=effector, max_ep_duration=duration)
+    env._device = th.device(device)
+    env.effector.to(device)
+    env.effector.muscle.to(device)
+    return env
 
 
 def midrange_start_joint_state(batch_size, device="cpu"):
@@ -80,3 +84,4 @@ def midrange_start_joint_state(batch_size, device="cpu"):
     t2 = 2.7053 / 2
     base = th.tensor([t1, t2, 0.0, 0.0], dtype=th.float32, device=device)
     return base.unsqueeze(0).expand(batch_size, -1).clone()
+

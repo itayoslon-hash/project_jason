@@ -27,7 +27,7 @@ model_path = "rigid_tendon_arm26_sinusoidal.pt"
 # -----------------------------
 # Environment and policy
 # -----------------------------
-env = make_env()
+env = make_env(device=device)
 
 policy = Policy(
     input_dim=env.observation_space.shape[0] + 2,  # +2 for (target_x, target_y)
