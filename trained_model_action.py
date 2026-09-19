@@ -16,7 +16,7 @@ frequencies = np.linspace(0.25, 2.5, 10)
 # -----------------------------
 # Environment and policy
 # -----------------------------
-env = make_env()
+env = make_env(device=device)
 
 policy = Policy(
     input_dim=env.observation_space.shape[0] + 2,  # +2 for (target_x, target_y)

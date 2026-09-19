@@ -18,12 +18,20 @@ if not th.cuda.is_available():
 device = th.device("cuda")
 print(f"Using device: {device} ({th.cuda.get_device_name(device)})")
 
-batch_size = 32
-n_batches = 1000
+# The rollout is a sequential loop of tiny ops, so the GPU is launch-bound
+# rather than compute-bound. A larger batch adds parallel work per step
+# without adding more sequential steps, which is the main lever to raise
+# GPU utilization here.
+th.backends.cudnn.benchmark = True
+th.backends.cuda.matmul.allow_tf32 = True
+th.backends.cudnn.allow_tf32 = True
+
+batch_size = 8192
+n_batches = 3000
 checkpoint_interval = 100
 checkpoint_path = "checkpoint.pt"
 model_path = "rigid_tendon_arm26_sinusoidal.pt"
-
+dist_penalty_scale = 20.0  # steepness of the exponential distance penalty
 # -----------------------------
 # Environment and policy
 # -----------------------------
@@ -97,16 +105,14 @@ for batch in range(start_batch, n_batches):
     target = env.make_target(batch_size, device, freq=freq)
     positions, actions = rollout(batch_size, target)
 
-    pos_loss = th.mean((positions[:, :, 0] - target[:, :, 0]) ** 2
-                     + (positions[:, :, 1] - target[:, :, 1]) ** 2)
+    # exponential penalty grows sharply with distance, unlike squared error
+    dist = th.sqrt((positions[:, :, 0] - target[:, :, 0]) ** 2
+                 + (positions[:, :, 1] - target[:, :, 1]) ** 2 + 1e-8)
+    pos_loss = th.mean(th.exp(dist_penalty_scale * dist) - 1.0)
 
-    vel_pos    = (positions[:, 1:, :] - positions[:, :-1, :]) / dt
-    vel_target = (target[:, 1:, :]    - target[:, :-1, :])    / dt
-    vel_loss   = th.mean((vel_pos - vel_target) ** 2)
+    loss = pos_loss
 
-    loss = pos_loss + 0.3 * vel_loss
-
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     loss.backward()
     th.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
     optimizer.step()
@@ -116,15 +122,15 @@ for batch in range(start_batch, n_batches):
     batch_time = time.time() - batch_start
     eta_min = batch_time * (n_batches - batch - 1) / 60
 
-    print(
-        f"Batch {batch + 1}/{n_batches} | "
-        f"Loss: {loss.item():.6f} | "
-        f"freq: {freq:.2f} | "
-        f"Pos: {pos_loss.item():.6f} | "
-        f"Vel: {vel_loss.item():.6f} | "
-        f"Time: {batch_time:.2f}s | "
-        f"ETA: {eta_min:.1f} min"
-    )
+    if (batch + 1) % 10 == 0 or batch == start_batch:
+        print(
+            f"Batch {batch + 1}/{n_batches} | "
+            f"Loss: {loss.item():.6f} | "
+            f"freq: {freq:.2f} | "
+            f"Pos: {pos_loss.item():.6f} | "
+            f"Time: {batch_time:.2f}s | "
+            f"ETA: {eta_min:.1f} min"
+        )
 
     if (batch + 1) % checkpoint_interval == 0:
         th.save({
